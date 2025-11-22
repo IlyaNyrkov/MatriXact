@@ -161,6 +161,7 @@ __global__ void split_matrix_kernel(double* matrix, int M, int N, int k,
     double aij = matrix[idx];
 
     for (int s = 0; s < k; s++) {
+        // BITS_PER_SLICE shouldnt be a constant. Find how it is calculated in Ozaki paper 
         int shift = MAX_DOUBLE_MANTISSA_LEN - BITS_PER_SLICE * s;
         double sigma = 0.75 * ldexp(scale_factor, shift);
         
