@@ -25,7 +25,7 @@ const double MATRIX_MIN_VAL = 0.0;
 const double MATRIX_MAX_VAL = 10.0;
 
 // Ozaki parameters
-const size_t slices = 2;
+const size_t slices = 3;
 
 // Matrix helpers
 
@@ -274,7 +274,7 @@ __global__ void convert_int32_uint8_modulo(int32_t* matrices, int rows, int cols
 
 // Step 5 Accumulate matrix products
 __global__ void accumulate_matrix_products(uint8_t* mod_C_matrices, int rows, int cols,
-     int slices, int64_t* accumulated_C, int64_t* partial_moduli, int64_t* mod_inv) {
+     int slices, int64_t* accumulated_C, int64_t* partial_moduli, int64_t* mod_inv, uint64_t matrix_product) {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row < rows && col < cols) {
@@ -284,7 +284,7 @@ __global__ void accumulate_matrix_products(uint8_t* mod_C_matrices, int rows, in
             int idx = row * cols + col;
             int64_t mod_C = static_cast<int64_t>(mod_C_matrices[s * rows * cols + idx]);
             accumulated_C[idx] += mod_C * partial_mod * inv;
-            accumulated_C[idx] %= moduli_products[slices - 1];
+            accumulated_C[idx] %= matrix_product;
         }
     }
 }
@@ -463,11 +463,11 @@ void ozaki2_gemm(const std::size_t P, const std::size_t Q, const std::size_t R,
 
         rocblas_gemm_ex(
             handle,
-            rocblas_operation_none, rocblas_operation_none,
+            rocblas_operation_transpose, rocblas_operation_transpose,
             m, n, k,
             &alpha_i32,
-            A_t, rocblas_datatype_i8_r, lda,
-            B_t, rocblas_datatype_i8_r, ldb,
+            B_t, rocblas_datatype_i8_r, lda,
+            A_t, rocblas_datatype_i8_r, ldb,
             &beta_i32,
             C_t, rocblas_datatype_i32_r, ldc,
             C_t, rocblas_datatype_i32_r, ldc,  // C as output
@@ -493,7 +493,7 @@ void ozaki2_gemm(const std::size_t P, const std::size_t Q, const std::size_t R,
     // -------------------------------------------------------------------------
     accumulate_matrix_products<<<gridC, block>>>(
         d_C_resid, P, R, slices,
-        d_C_accum, d_partial_moduli, d_mod_inv);
+        d_C_accum, d_partial_moduli, d_mod_inv, moduli_products[slices - 1]);
 
     hipDeviceSynchronize();
 
