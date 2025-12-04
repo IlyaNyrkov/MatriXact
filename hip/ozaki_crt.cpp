@@ -11,6 +11,7 @@
 #include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
 
+
 // Matrix sizes
 const std::size_t P = 2<<10;
 const std::size_t Q = 2<<10;
@@ -21,11 +22,11 @@ const int PRINT_ROWS = 5;
 const int PRINT_COLS = 5;
 
 // Matrix value parameters
-const double MATRIX_MIN_VAL = 0.0;
-const double MATRIX_MAX_VAL = 10.0;
+const double MATRIX_MIN_VAL = 100.0;
+const double MATRIX_MAX_VAL = 1000.0;
 
 // Ozaki parameters
-const size_t slices = 3;
+const size_t slices = 4;
 
 // Matrix helpers
 
@@ -34,7 +35,7 @@ void print_matrix(const std::string& name, const std::vector<double>& matrix,
     std::cout << name << " (first " << n_rows << "x" << n_cols << "):" << std::endl;
     for (int i = 0; i < std::min(n_rows, rows); ++i) {
         for (int j = 0; j < std::min(n_cols, cols); ++j) {
-            std::cout << std::setw(8) << std::setprecision(4)
+            std::cout << std::setw(8) << std::setprecision(11)
                       << static_cast<double>(matrix[i * cols + j]) << " ";
         }
         std::cout << std::endl;
@@ -102,24 +103,24 @@ const uint8_t moduli_all[] = {255, 253, 251, 247, 239, 233, 229, 227};
 
 const uint64_t moduli_products[] = {
     // s=1
-    255,
+    255ULL,
     // s=2
-    64515,
+    64515ULL,
     // s=3
-    16193265,
+    16193265ULL,
     // s=4
-    3999736455,
+    3999736455ULL,
     // s=5
-    955937012745,
+    955937012745ULL,
     // s=6
-    222733323969585,
+    222733323969585ULL,
     // s=7
-    51005931189034965,
+    51005931189034965ULL,
     // s=8
-    11578346379910937055
+    11578346379910937055ULL
     };
 
-const uint64_t partial_moduli[8][8] = {
+constexpr uint64_t partial_moduli[8][8] = {
     // s=1
     {1},
     // s=2
@@ -167,6 +168,16 @@ const uint64_t mod_inv[8][8] = {
 
 // Ozaki methods
 
+__device__ int8_t symmetric_mod(int64_t a, uint8_t m) {
+    int8_t q = std::floor((long double)a / (long double)m + 0.5L);
+    return a - q * m;
+}
+
+__device__ int64_t symmetric_mod(int64_t a, uint64_t m) {
+    int64_t q = std::floor((long double)a / (long double)m + 0.5L);
+    return a - q * m;
+}
+
 // Step 2.1 Calculate shift matrices
 __global__ void compute_row_max_exponent_A(const double* __restrict__ A,
                                            int rows, int cols,
@@ -181,11 +192,8 @@ __global__ void compute_row_max_exponent_A(const double* __restrict__ A,
 
     // protect against log2(0) -> -inf
     int e = 0;
-    if (v > 0.0) {
-        double lg = log2(v);
-        e = (int)ceil(lg);
-        if (e < 0) e = 0;  // clamp if you want
-    }
+    double lg = log2(v);
+    e = (int)ceil(lg);
 
     // we want max exponent per row
     atomicMax(&row_exp[row], e);
@@ -204,11 +212,9 @@ __global__ void compute_col_max_exponent_B(const double* __restrict__ B,
     double v = fabs(B[row * cols + col]);
 
     int e = 0;
-    if (v > 0.0) {
-        double lg = log2(v);
-        e = (int)ceil(lg);
-        if (e < 0) e = 0;
-    }
+
+    double lg = log2(v);
+    e = (int)ceil(lg);
 
     // we want max exponent per column
     atomicMax(&col_exp[col], e);
@@ -247,14 +253,24 @@ __global__ void truncate_and_multiply_B(double* B, int32_t* shifts, int rows, in
 
 // Step 2.3 Compute s modulo matrices
 // each slice iteration can be parallelized aswell
+
+__device__ int8_t balanced_mod(int64_t x, uint8_t m) {
+    int r = x % m;
+    r = (r < 0) ? r + m : r;
+    r = (r > m/2) ? r - m : r;
+    return static_cast<int8_t>(r);
+}
+
 __global__ void compute_modulo_matrices(int64_t* matrix, uint8_t* moduli, int rows, int cols,
-     int slices, uint8_t* mod_matrices) {
+     int slices, int8_t* mod_matrices) {
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row < rows && col < cols) {
         for (int s = 0; s < slices; ++s) {
             int idx = row * cols + col;
-            mod_matrices[s * rows * cols + idx] = static_cast<uint8_t>(matrix[idx] % moduli[s]);
+            //mod_matrices[s * rows * cols + idx] = static_cast<int8_t>(matrix[idx] % moduli[s]);
+            
+            mod_matrices[s * rows * cols + idx] = symmetric_mod(matrix[idx], moduli[s]);
         }
     }
 }
@@ -267,7 +283,18 @@ __global__ void convert_int32_uint8_modulo(int32_t* matrices, int rows, int cols
     if (col < cols && row < rows) {
         for (int s = 0; s < slices; ++s) {
             int idx = s * rows * cols + row * cols + col;
-            uint8_matrices[idx] = static_cast<uint8_t>(matrices[idx] % moduli[s]);
+
+            int32_t val = matrices[idx];
+            int32_t mod_val = moduli[s];
+            
+            // 2. Compute remainder
+            int32_t rem = val % mod_val;
+            
+            // 3. Correct for negative results to make it a proper Euclidean remainder
+            if (rem < 0) rem += mod_val;
+            
+            // 4. Store
+            uint8_matrices[idx] = static_cast<uint8_t>(rem);
         }
     }
 }
@@ -285,11 +312,12 @@ __global__ void accumulate_matrix_products(uint8_t* mod_C_matrices, int rows, in
             int64_t mod_C = static_cast<int64_t>(mod_C_matrices[s * rows * cols + idx]);
             accumulated_C[idx] += mod_C * partial_mod * inv;
             accumulated_C[idx] %= matrix_product;
+            //accumulated_C[idx] = symmetric_mod(accumulated_C[idx], matrix_product);
         }
     }
 }
 
-// Stage 6: Inversely scale matrix product
+// Step 6: Inversely scale matrix product
 
 __global__ void inversely_scale_matrix(int64_t* C, int rows, int cols, int32_t* shift_vector_A, int32_t* shift_vector_B,
      uint64_t moduli_product, double* results) {
@@ -298,7 +326,7 @@ __global__ void inversely_scale_matrix(int64_t* C, int rows, int cols, int32_t* 
     if (row < rows && col < cols) {
         int idx = row * cols + col;
         uint32_t e = shift_vector_A[row] + shift_vector_B[col];
-        results[idx] = ldexp(static_cast<double>(C[idx] % moduli_product), -e);
+        results[idx] = ldexp(static_cast<double>(C[idx]), -e);
     }
 }
 
@@ -341,10 +369,10 @@ void ozaki2_gemm(const std::size_t P, const std::size_t Q, const std::size_t R,
     hipMalloc(&d_B_int, sizeB * sizeof(int64_t));
 
     // INT8 slices A'_t, B'_t (step 2.3)
-    uint8_t* d_A_slices = nullptr;
-    uint8_t* d_B_slices = nullptr;
-    hipMalloc(&d_A_slices, slices * sizeA * sizeof(uint8_t));
-    hipMalloc(&d_B_slices, slices * sizeB * sizeof(uint8_t));
+    int8_t* d_A_slices = nullptr;
+    int8_t* d_B_slices = nullptr;
+    hipMalloc(&d_A_slices, slices * sizeA * sizeof(int8_t));
+    hipMalloc(&d_B_slices, slices * sizeB * sizeof(int8_t));
 
     // INT32 tensor-core outputs C'_t (step 3)
     int32_t* d_C_tc = nullptr;
@@ -383,7 +411,15 @@ void ozaki2_gemm(const std::size_t P, const std::size_t Q, const std::size_t R,
     dim3 gridB((Q + block.x - 1) / block.x,
                (R + block.y - 1) / block.y);
 
-    const int32_t K = std::floor(0.5 * std::log2((M/2.0 - 1.0)/Q));;
+    double Md   = static_cast<double>(M);
+    std::cout << "Ozaki matrix product modulus M: " << M << std::endl;
+    double Qd   = static_cast<double>(Q);
+    double frac = (Md / 2.0 - 1.0) / Qd;
+    std::cout << "Ozaki fraction (M/2 - 1) / Q: " << frac << std::endl;
+    double Kd   = 0.5 * std::log2(frac);
+    std::cout << "Ozaki K parameter (double): " << Kd << std::endl;
+    int32_t K   = static_cast<int32_t>(std::floor(Kd));
+    std::cout << "Ozaki K parameter: " << K << std::endl;
 
     int32_t* d_row_exp_A = nullptr;
     int32_t* d_col_exp_B = nullptr;
@@ -457,8 +493,8 @@ void ozaki2_gemm(const std::size_t P, const std::size_t Q, const std::size_t R,
 
     // simplest: loop over slices, one GEMM per slice
     for (int t = 0; t < slices; ++t) {
-        uint8_t*  A_t = d_A_slices + t * strideA;
-        uint8_t*  B_t = d_B_slices + t * strideB;
+        int8_t*  A_t = d_A_slices + t * strideA;
+        int8_t*  B_t = d_B_slices + t * strideB;
         int32_t* C_t = d_C_tc      + t * strideC;
 
         rocblas_gemm_ex(
@@ -546,7 +582,12 @@ int main() {
     std::vector<double> h_C_ozaki(m * p, 0.0);
 
     generate_random_matrix(h_A, (int)m, (int)n);
+    std::cout << "Generated random matrix A.\n";
+    print_matrix("A", h_A, (int)m, (int)n, PRINT_ROWS, PRINT_COLS);
+
     generate_random_matrix(h_B, (int)n, (int)p);
+    std::cout << "Generated random matrix B.\n";
+    print_matrix("B", h_B, (int)n, (int)p, PRINT_ROWS, PRINT_COLS);
 
     // Device buffers
     double* d_A = nullptr;
