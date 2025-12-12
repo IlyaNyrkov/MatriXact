@@ -30,7 +30,11 @@ else()
 endif()
 
 add_library(matrixact_omp INTERFACE
-        benchmarks/bench_gemm.cpp)
+        benchmarks/bench_gemm.cpp
+        examples/main.cpp
+        omp_playground/omp_playground.cpp
+)
+
 target_include_directories(matrixact_omp INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)
@@ -39,6 +43,8 @@ target_compile_definitions(matrixact_omp INTERFACE OZK_HAS_OMP=1)
 
 option(MX_OMP_BUILD_TESTS "Build tests" ON)
 option(MX_OMP_BUILD_EXAMPLES "Build examples" ON)
+option(MX_OMP_BUILD_PLAYGROUND "Build playground" ON)
+
 if (MX_OMP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
@@ -50,4 +56,8 @@ endif()
 option(MX_OMP_BUILD_BENCH "Build benchmarks" ON)
 if (MX_OMP_BUILD_BENCH)
     add_subdirectory(benchmarks)
+endif()
+
+if (MX_OMP_BUILD_PLAYGROUND)
+    add_subdirectory(omp_playground)
 endif()

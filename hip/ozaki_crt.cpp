@@ -5,6 +5,21 @@
 #include <chrono>
 #include <cmath>
 
+// TO DO:
+// Add const, constexpr, inline, restrict where it fits
+// Move gpu steps of ozaki into separate __device__ functions 
+// Add a separate struct i.e. ozaki context which is required for allocating and freeing memory
+// Add warp shuffles everywhere
+// Add vector types everywhere
+// Add tests
+// Add version of ozaki which frees memory as early as possible
+// Add batched GEMMs
+// Parallize over each slice and each element in Module matrices
+// Organize all ozaki split functions into a separate library to use it in other algothms like SPmV
+// Try using:
+//  dynamic parallelism
+//  streams
+//  batched load
 
 // AMD headers
 #include <hip/hip_runtime.h>
